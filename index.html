@@ -479,6 +479,7 @@ function fitToCell(dataUrl){
 }
 function toBuffer(dataUrl){const bin=atob(dataUrl.split('base64,')[1]),arr=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);return arr.buffer;}
 
+// 替换原有的 exportExcel 函数
 async function exportExcel(){
   if(!records.length) return;
   showToast('正在生成Excel，请稍候...');
@@ -492,10 +493,10 @@ async function exportExcel(){
     h.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF4472C4'}};
     h.alignment={vertical:'middle',horizontal:'center'};
 
-    // 定义单元格的最大安全像素范围（用来计算等比例缩放）
-    // Excel 的行高 280 大约对应 373 像素；列宽 60 大约对应 420 像素
-    const MAX_W = 400; // 留出一点水平边距
-    const MAX_H = 340; // 留出一点垂直边距
+    // 【修改点1】设置更保守的物理像素上限。
+    // 行高 280 约等于 373 像素。我们将最大高度收缩到 320，确保底部有充足的安全边距。
+    const MAX_W = 380; 
+    const MAX_H = 320; 
 
     for(let i=0;i<records.length;i++){
       const row=records[i],ri=i+2,er=ws.getRow(ri);
@@ -507,12 +508,9 @@ async function exportExcel(){
           const url=row.images[j];
           if(!url||!url.includes('base64,')) continue;
           try{
-            // 获取原图数据和宽高
             const imgData = await fitToCell(url);
             if (!imgData) continue;
 
-            // 【核心】计算等比例缩放系数
-            // 取宽度缩放比和高度缩放比中更小的那一个，确保长宽都不会超过单元格
             const scale = Math.min(MAX_W / imgData.width, MAX_H / imgData.height);
             const finalW = Math.round(imgData.width * scale);
             const finalH = Math.round(imgData.height * scale);
@@ -520,10 +518,10 @@ async function exportExcel(){
             const id=wb.addImage({buffer:toBuffer(imgData.base64),extension:'jpeg'});
             
             ws.addImage(id,{
-              // tl: Top-Left，加 0.05 的目的是让图片稍微偏移一点点，不要完全死贴在单元格边框线上
-              tl:{col: j + 1 + 0.05, row: ri - 1 + 0.05}, 
+              // 【修改点2】将偏移量改小 (0.05 -> 0.02)，防止图片被向下推挤出边框
+              tl:{col: j + 1 + 0.02, row: ri - 1 + 0.02}, 
               ext:{width: finalW, height: finalH},
-              editAs:'oneCell' // 改用 oneCell：图片大小保持我们计算的等比尺寸，但会跟着单元格移动，不越界
+              editAs:'oneCell' 
             });
           }catch(e){console.error('图片跳过',e);}
         }
