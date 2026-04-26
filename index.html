@@ -454,25 +454,26 @@ function renderRecordsList(){
 function deleteRow(i){records.splice(i,1);renderRecordsList();saveToStorage();showToast('已删除');}
 function clearAllRecords(){if(!records.length)return;if(!confirm(`确定清空全部 ${records.length} 行记录？`))return;records=[];renderRecordsList();saveToStorage();showToast('已清空所有记录');}
 
-// ===================== 导出Excel（纯前端）=====================
+// 替换原有的 fitToCell 函数
 function fitToCell(dataUrl){
   return new Promise(resolve=>{
     const img=new Image();
     img.onload=()=>{
       const c=document.createElement('canvas');
-
-      // 直接用图片尺寸
+      // 保持原始分辨率
       c.width=img.naturalWidth;
       c.height=img.naturalHeight;
-
       const ct=c.getContext('2d');
-
-      // 不要白背景
       ct.drawImage(img,0,0);
-
-      resolve(c.toDataURL('image/jpeg',0.95));
+      
+      // 返回对象：包含高画质base64和原图的宽高
+      resolve({
+        base64: c.toDataURL('image/jpeg', 0.95), // 0.95 保证了很好的画质
+        width: img.naturalWidth,
+        height: img.naturalHeight
+      });
     };
-    img.onerror=()=>resolve(dataUrl);
+    img.onerror=()=>resolve(null);
     img.src=dataUrl;
   });
 }
@@ -491,18 +492,39 @@ async function exportExcel(){
     h.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF4472C4'}};
     h.alignment={vertical:'middle',horizontal:'center'};
 
+    // 定义单元格的最大安全像素范围（用来计算等比例缩放）
+    // Excel 的行高 280 大约对应 373 像素；列宽 60 大约对应 420 像素
+    const MAX_W = 400; // 留出一点水平边距
+    const MAX_H = 340; // 留出一点垂直边距
+
     for(let i=0;i<records.length;i++){
       const row=records[i],ri=i+2,er=ws.getRow(ri);
       er.height=280;
       const tc=ws.getCell(ri,1); tc.value=row.text||''; tc.alignment={vertical:'middle',wrapText:true}; tc.font={size:11};
+      
       if(Array.isArray(row.images)){
         for(let j=0;j<Math.min(row.images.length,3);j++){
           const url=row.images[j];
           if(!url||!url.includes('base64,')) continue;
           try{
-            const fitted=await fitToCell(url);
-            const id=wb.addImage({buffer:toBuffer(fitted),extension:'jpeg'});
-            ws.addImage(id,{tl:{col:j+1,row:ri-1},ext:{width:800,height:600},editAs:'absolute'});
+            // 获取原图数据和宽高
+            const imgData = await fitToCell(url);
+            if (!imgData) continue;
+
+            // 【核心】计算等比例缩放系数
+            // 取宽度缩放比和高度缩放比中更小的那一个，确保长宽都不会超过单元格
+            const scale = Math.min(MAX_W / imgData.width, MAX_H / imgData.height);
+            const finalW = Math.round(imgData.width * scale);
+            const finalH = Math.round(imgData.height * scale);
+
+            const id=wb.addImage({buffer:toBuffer(imgData.base64),extension:'jpeg'});
+            
+            ws.addImage(id,{
+              // tl: Top-Left，加 0.05 的目的是让图片稍微偏移一点点，不要完全死贴在单元格边框线上
+              tl:{col: j + 1 + 0.05, row: ri - 1 + 0.05}, 
+              ext:{width: finalW, height: finalH},
+              editAs:'oneCell' // 改用 oneCell：图片大小保持我们计算的等比尺寸，但会跟着单元格移动，不越界
+            });
           }catch(e){console.error('图片跳过',e);}
         }
       }
