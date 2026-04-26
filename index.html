@@ -178,23 +178,59 @@ let audioCtx = null;
 let mediaStreamSource = null;
 let processor = null;
 
+// 官方 CDN 模型地址（备用多个，依次尝试）
+const MODEL_URLS = [
+  'https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip',
+  'https://ccoreilly.github.io/vosk-browser/models/vosk-model-small-cn-0.22.zip',
+];
+
 async function initVosk() {
   if (voskModel && recognizer) return true;
-  
-  showToast('首次加载离线模型(约40MB)，请耐心等待...');
-  try {
-    const { createModel } = window.Vosk;
-    // 指向你 GitHub 仓库中的模型压缩包路径
-    voskModel = await createModel('vosk-model-small-cn-0.22.zip'); 
-    recognizer = new voskModel.KaldiRecognizer(16000);
-    showToast('离线模型加载完成 ✅');
-    return true;
-  } catch (err) {
-    showToast('模型加载失败，请检查网络或模型路径');
-    console.error(err);
-    setBtnIdle();
-    return false;
+
+  // 更新状态文字为下载进度提示
+  const statusEl = document.getElementById('voiceStatus');
+  const btnInner = document.getElementById('voiceBtnInner');
+
+  function setLoadingText(msg) {
+    statusEl.textContent = msg;
+    statusEl.className = 'voice-status processing';
+    btnInner.textContent = '⏳ 加载中...';
   }
+
+  setLoadingText('正在连接模型服务器，请稍候...');
+
+  // 尝试多个镜像地址
+  for (let i = 0; i < MODEL_URLS.length; i++) {
+    const url = MODEL_URLS[i];
+    try {
+      setLoadingText(`正在下载离线语音模型（约40MB），请保持网络连接...`);
+      console.log(`尝试加载模型：${url}`);
+
+      const { createModel } = window.Vosk;
+
+      // 用 fetch 先检测可达性（5秒超时）
+      const probe = await Promise.race([
+        fetch(url, { method: 'HEAD', mode: 'no-cors' }),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 5000))
+      ]).catch(() => null);
+
+      // 加载模型（Vosk 内部会下载 zip）
+      voskModel = await createModel(url);
+      recognizer = new voskModel.KaldiRecognizer(16000);
+      showToast('离线模型加载完成 ✅');
+      return true;
+    } catch (err) {
+      console.warn(`模型地址 ${url} 加载失败：`, err);
+      if (i < MODEL_URLS.length - 1) {
+        setLoadingText(`线路${i+1}失败，正在切换备用线路...`);
+        await new Promise(r => setTimeout(r, 1000));
+      }
+    }
+  }
+
+  showToast('模型加载失败：网络不稳定，请检查网络后重试');
+  setBtnIdle();
+  return false;
 }
 
 async function toggleRecording() {
@@ -217,8 +253,8 @@ function setBtnRecording(){
 function setBtnProcessing(){
   isRecording=false;
   document.getElementById('voiceBtn').className='voice-btn processing';
-  document.getElementById('voiceBtnInner').textContent='⏳ 识别加载中...';
-  const s=document.getElementById('voiceStatus'); s.textContent='正在加载离线模型，请稍候...'; s.className='voice-status processing';
+  document.getElementById('voiceBtnInner').textContent='⏳ 加载中...';
+  const s=document.getElementById('voiceStatus'); s.textContent='正在初始化，请稍候...'; s.className='voice-status processing';
 }
 
 function setBtnIdle(){
