@@ -185,7 +185,7 @@ async function initVosk() {
   try {
     const { createModel } = window.Vosk;
     // 指向你 GitHub 仓库中的模型压缩包路径
-    voskModel = await createModel('vosk-model-small-cn-0.2.2.zip'); 
+    voskModel = await createModel('vosk-model-small-cn-0.22.zip'); 
     recognizer = new voskModel.KaldiRecognizer(16000);
     showToast('离线模型加载完成 ✅');
     return true;
