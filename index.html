@@ -8,13 +8,14 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="记录表">
   <meta name="theme-color" content="#4472C4">
-  <!-- PWA manifest -->
   <link rel="manifest" href="manifest.json">
-  <!-- iOS PWA icons -->
   <link rel="apple-touch-icon" href="icon-192.png">
   <title>语音拍照记录表</title>
+  
   <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/vosk-browser@0.0.8/dist/vosk.js"></script>
+  
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif; background: #f0f2f5; min-height: 100vh; }
@@ -25,6 +26,7 @@
     .pwa-banner { background: #fff3cd; border-bottom: 1px solid #ffc107; padding: 10px 16px; display: flex; align-items: center; justify-content: space-between; font-size: 13px; color: #856404; }
     .pwa-banner button { background: #ffc107; border: none; border-radius: 8px; padding: 6px 12px; font-size: 12px; cursor: pointer; color: #333; font-weight: 600; }
     .pwa-banner .close-btn { background: none; color: #aaa; padding: 4px; }
+    
     .container { padding: 16px; max-width: 600px; margin: 0 auto; }
 
     .input-card { background: white; border-radius: 16px; padding: 20px; margin-bottom: 16px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
@@ -96,7 +98,6 @@
 </head>
 <body>
 
-<!-- PWA 安装提示横幅 -->
 <div class="pwa-banner" id="pwaBanner" style="display:none">
   <span>📲 安装到主屏幕，离线也能用</span>
   <div style="display:flex;gap:6px">
@@ -107,7 +108,7 @@
 
 <div class="header">
   <h1>🎤 语音拍照记录表</h1>
-  <p>语音输入 + 拍照标注，自动生成Excel</p>
+  <p>离线语音输入 + 拍照标注，自动生成Excel</p>
 </div>
 
 <div class="container">
@@ -118,6 +119,7 @@
     </button>
     <div class="voice-status" id="voiceStatus">点击按钮开始说话，说完再次点击停止识别</div>
     <textarea class="text-display" id="textDisplay" placeholder="语音识别结果显示在这里，也可以手动输入或修改..."></textarea>
+    
     <div class="photo-label">📷 添加图片（最多3张，可点击✏️标注）</div>
     <div class="photo-grid" id="photoGrid">
       <div class="add-photo-btn" onclick="addPhoto()"><span>＋</span><span>拍照/选图</span></div>
@@ -139,7 +141,6 @@
   </div>
 </div>
 
-<!-- 图片标注编辑器 -->
 <div class="editor-overlay" id="editorOverlay">
   <div class="editor-toolbar">
     <button class="tool-btn active" id="toolPen"    onclick="setTool('pen')">✏️ 画笔</button>
@@ -167,13 +168,139 @@
 <div class="toast" id="toast"></div>
 
 <script>
-// ===================== 讯飞配置 =====================
-const XF_APPID      = 'ed958adf';
-const XF_API_KEY    = '21849580283bff759bb2a50f6ed0db2d';
-const XF_API_SECRET = 'Yjk3ZDBkNmVkMmRjZWNjNTQ5MTEzYjEy';
-
 // ===================== 全局状态 =====================
-let records=[], currentImages=[], isRecording=false, mediaRecorder=null, audioChunks=[], safetyTimer=null;
+let records=[], currentImages=[], isRecording=false, safetyTimer=null;
+
+// ===================== Vosk 离线语音识别 =====================
+let voskModel = null;
+let recognizer = null;
+let audioCtx = null;
+let mediaStreamSource = null;
+let processor = null;
+
+async function initVosk() {
+  if (voskModel && recognizer) return true;
+  
+  showToast('首次加载离线模型(约40MB)，请耐心等待...');
+  try {
+    const { createModel } = window.Vosk;
+    // 指向你 GitHub 仓库中的模型压缩包路径
+    voskModel = await createModel('vosk-model-small-cn-0.2.2.zip'); 
+    recognizer = new voskModel.KaldiRecognizer(16000);
+    showToast('离线模型加载完成 ✅');
+    return true;
+  } catch (err) {
+    showToast('模型加载失败，请检查网络或模型路径');
+    console.error(err);
+    setBtnIdle();
+    return false;
+  }
+}
+
+async function toggleRecording() {
+  if (isRecording) {
+    stopRecording();
+  } else {
+    setBtnProcessing(); // 显示加载状态
+    const isReady = await initVosk();
+    if (isReady) await startRecording();
+  }
+}
+
+function setBtnRecording(){
+  isRecording=true;
+  document.getElementById('voiceBtn').className='voice-btn recording';
+  document.getElementById('voiceBtnInner').innerHTML='<div class="wave-bars"><div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div></div> 点击停止录音';
+  const s=document.getElementById('voiceStatus'); s.textContent='🔴 正在录音...'; s.className='voice-status recording';
+}
+
+function setBtnProcessing(){
+  isRecording=false;
+  document.getElementById('voiceBtn').className='voice-btn processing';
+  document.getElementById('voiceBtnInner').textContent='⏳ 识别加载中...';
+  const s=document.getElementById('voiceStatus'); s.textContent='正在加载离线模型，请稍候...'; s.className='voice-status processing';
+}
+
+function setBtnIdle(){
+  isRecording=false;
+  document.getElementById('voiceBtn').className='voice-btn';
+  document.getElementById('voiceBtnInner').textContent='🎤 点击开始录音';
+  const s=document.getElementById('voiceStatus'); s.textContent='点击按钮开始说话，说完再次点击停止识别'; s.className='voice-status';
+}
+
+async function startRecording() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1, sampleRate: 16000 }
+    });
+    
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
+    mediaStreamSource = audioCtx.createMediaStreamSource(stream);
+    processor = audioCtx.createScriptProcessor(4096, 1, 1);
+    
+    document.getElementById('textDisplay').value = '';
+    
+    processor.onaudioprocess = (e) => {
+      if (!isRecording) return;
+      const audioData = e.inputBuffer.getChannelData(0);
+      
+      if (recognizer.acceptWaveform(audioData)) {
+        const result = recognizer.getResult();
+        if (result.text) {
+          // 去除 Vosk 中文识别结果里自带的空格
+          const cleanText = result.text.replace(/\s+/g, '');
+          const currentText = document.getElementById('textDisplay').value;
+          document.getElementById('textDisplay').value = currentText + cleanText;
+        }
+      }
+    };
+
+    mediaStreamSource.connect(processor);
+    processor.connect(audioCtx.destination);
+
+    setBtnRecording();
+    
+    // 安全机制：最长录音1分钟自动停止
+    safetyTimer = setTimeout(() => {
+      if (isRecording) stopRecording();
+    }, 60000);
+
+  } catch (err) {
+    showToast('无法启动录音：' + err.message);
+    setBtnIdle();
+  }
+}
+
+function stopRecording() {
+  isRecording = false;
+  clearTimeout(safetyTimer);
+  
+  if (processor) {
+    processor.disconnect();
+    processor = null;
+  }
+  if (mediaStreamSource) {
+    mediaStreamSource.mediaStream.getTracks().forEach(t => t.stop());
+    mediaStreamSource.disconnect();
+    mediaStreamSource = null;
+  }
+  if (audioCtx && audioCtx.state !== 'closed') {
+    audioCtx.close();
+    audioCtx = null;
+  }
+
+  // 获取最后一段未完成的识别结果
+  if (recognizer) {
+    const finalResult = recognizer.getFinalResult();
+    if (finalResult.text) {
+      const cleanText = finalResult.text.replace(/\s+/g, '');
+      const currentText = document.getElementById('textDisplay').value;
+      document.getElementById('textDisplay').value = currentText + cleanText;
+    }
+  }
+
+  setBtnIdle();
+}
 
 // ===================== PWA =====================
 let deferredPrompt = null;
@@ -199,7 +326,6 @@ function dismissBanner() {
   localStorage.setItem('pwaBannerDismissed', '1');
   document.getElementById('pwaBanner').style.display = 'none';
 }
-// 注册 Service Worker
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
     navigator.serviceWorker.register('sw.js').catch(() => {});
@@ -261,149 +387,7 @@ function compressImage(dataUrl, maxSize=2000, quality=0.95) {
   });
 }
 
-// ===================== 编辑器 =====================
-let editingIndex=-1, tool='pen', drawColor='#ff3b30', drawSize=4;
-let strokes=[], currentStroke=null, isDrawing=false, baseImage=null, canvas, ctx, startX, startY;
-
-// ===================== 讯飞鉴权 =====================
-async function getXFUrl() {
-  const host='iat-api.xfyun.cn', date=new Date().toUTCString();
-  const signOrigin=`host: ${host}\ndate: ${date}\nGET /v2/iat HTTP/1.1`;
-  const enc=new TextEncoder();
-  const key=await crypto.subtle.importKey('raw',enc.encode(XF_API_SECRET),{name:'HMAC',hash:'SHA-256'},false,['sign']);
-  const sig=await crypto.subtle.sign('HMAC',key,enc.encode(signOrigin));
-  const sigB64=btoa(String.fromCharCode(...new Uint8Array(sig)));
-  const authOrigin=`api_key="${XF_API_KEY}", algorithm="hmac-sha256", headers="host date request-line", signature="${sigB64}"`;
-  return `wss://${host}/v2/iat?authorization=${encodeURIComponent(btoa(authOrigin))}&date=${encodeURIComponent(date)}&host=${host}`;
-}
-
-// ===================== PCM转换 =====================
-function convertToPCM(blob) {
-  return new Promise((resolve,reject)=>{
-    const reader=new FileReader();
-    reader.onerror=()=>reject(new Error('读取音频失败'));
-    reader.onload=e=>{
-      let ac;
-      try{ac=new (window.AudioContext||window.webkitAudioContext)({sampleRate:16000});}
-      catch(err){return reject(new Error('AudioContext失败'));}
-      const t=setTimeout(()=>{try{ac.close();}catch(_){}reject(new Error('解码超时'));},8000);
-      ac.decodeAudioData(e.target.result,
-        buf=>{
-          clearTimeout(t);
-          const pcm=buf.getChannelData(0), i16=new Int16Array(pcm.length);
-          for(let i=0;i<pcm.length;i++) i16[i]=Math.max(-32768,Math.min(32767,Math.round(pcm[i]*32767)));
-          ac.close().catch(()=>{});
-          resolve(new Blob([i16.buffer],{type:'audio/L16'}));
-        },
-        ()=>{clearTimeout(t);try{ac.close();}catch(_){}resolve(blob);}
-      );
-    };
-    reader.readAsArrayBuffer(blob);
-  });
-}
-
-// ===================== 讯飞识别 =====================
-function recognizeAudio(audioBlob) {
-  return new Promise(async(resolve,reject)=>{
-    let url; try{url=await getXFUrl();}catch(e){return reject(new Error('鉴权失败'));}
-    let pcmBlob; try{pcmBlob=await convertToPCM(audioBlob);}catch(e){return reject(new Error('音频处理失败'));}
-    let pcmArray; try{pcmArray=new Uint8Array(await pcmBlob.arrayBuffer());}catch(e){return reject(new Error('音频读取失败'));}
-    const segs=[]; let settled=false;
-    const done=t=>{if(settled)return;settled=true;resolve(t);};
-    const fail=e=>{if(settled)return;settled=true;reject(e);};
-    let ws; try{ws=new WebSocket(url);}catch(e){return fail(new Error('WebSocket创建失败'));}
-    const wst=setTimeout(()=>{try{ws.close();}catch(_){}done(segs.join(''));},60000);
-    ws.onopen=()=>{
-      const FRAME=1280; let offset=0,idx=0;
-      const send=()=>{
-        if(settled) return;
-        if(offset>=pcmArray.length){
-          try{ws.send(JSON.stringify({data:{status:2,format:'audio/L16;rate=16000',encoding:'raw',audio:''}}));}catch(_){}
-          return;
-        }
-        const chunk=pcmArray.slice(offset,offset+FRAME);
-        const b64=btoa(String.fromCharCode(...chunk));
-        const isFirst=idx===0;
-        const frame={
-          ...(isFirst?{common:{app_id:XF_APPID}}:{}),
-          ...(isFirst?{business:{language:'zh_cn',domain:'iat',accent:'mandarin',vad_eos:5000,dwa:'wpgs'}}:{}),
-          data:{status:isFirst?0:1,format:'audio/L16;rate=16000',encoding:'raw',audio:b64}
-        };
-        try{ws.send(JSON.stringify(frame));}catch(_){return;}
-        offset+=FRAME; idx++; setTimeout(send,40);
-      };
-      send();
-    };
-    ws.onmessage=e=>{
-      let msg; try{msg=JSON.parse(e.data);}catch(_){return;}
-      if(msg.code!==0){clearTimeout(wst);try{ws.close();}catch(_){}fail(new Error(`讯飞错误(${msg.code}):${msg.message}`));return;}
-      if(msg.data?.result){
-        let text='';
-        (msg.data.result.ws||[]).forEach(w=>w.cw.forEach(c=>{text+=c.w;}));
-        const pgs=msg.data.result.pgs, rg=msg.data.result.rg;
-        if(pgs==='rpl'&&Array.isArray(rg)&&rg.length===2) segs.splice(rg[0]-1,rg[1]-rg[0]+1,text);
-        else segs.push(text);
-        document.getElementById('textDisplay').value=segs.join('');
-      }
-      if(msg.data?.status===2){clearTimeout(wst);try{ws.close();}catch(_){}done(segs.join(''));}
-    };
-    ws.onerror=()=>{clearTimeout(wst);fail(new Error('WebSocket连接失败'));};
-    ws.onclose=()=>{clearTimeout(wst);done(segs.join(''));};
-  });
-}
-
-// ===================== 录音 =====================
-async function toggleRecording(){if(isRecording)stopRecording();else await startRecording();}
-
-function setBtnRecording(){
-  isRecording=true;
-  document.getElementById('voiceBtn').className='voice-btn recording';
-  document.getElementById('voiceBtnInner').innerHTML='<div class="wave-bars"><div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div></div> 点击停止录音';
-  const s=document.getElementById('voiceStatus'); s.textContent='🔴 正在录音...'; s.className='voice-status recording';
-}
-function setBtnProcessing(){
-  isRecording=false;
-  document.getElementById('voiceBtn').className='voice-btn processing';
-  document.getElementById('voiceBtnInner').textContent='⏳ 识别中...';
-  const s=document.getElementById('voiceStatus'); s.textContent='正在识别，请稍候...'; s.className='voice-status processing';
-}
-function setBtnIdle(){
-  isRecording=false;
-  document.getElementById('voiceBtn').className='voice-btn';
-  document.getElementById('voiceBtnInner').textContent='🎤 点击开始录音';
-  const s=document.getElementById('voiceStatus'); s.textContent='点击按钮开始说话，说完再次点击停止识别'; s.className='voice-status';
-}
-
-async function startRecording(){
-  try{
-    const stream=await navigator.mediaDevices.getUserMedia({audio:true});
-    const mime=['audio/webm;codecs=pcm','audio/webm','audio/ogg'].find(t=>MediaRecorder.isTypeSupported(t))||'';
-    mediaRecorder=new MediaRecorder(stream,mime?{mimeType:mime}:{});
-    audioChunks=[];
-    document.getElementById('textDisplay').value='';
-    mediaRecorder.ondataavailable=e=>{if(e.data&&e.data.size>0)audioChunks.push(e.data);};
-    mediaRecorder.onstop=async()=>{
-      stream.getTracks().forEach(t=>t.stop());
-      setBtnProcessing();
-      clearTimeout(safetyTimer);
-      safetyTimer=setTimeout(()=>{showToast('识别超时，请重试');setBtnIdle();},35000);
-      try{
-        if(!audioChunks.length) throw new Error('未录到音频');
-        const result=await recognizeAudio(new Blob(audioChunks,{type:mime||'audio/webm'}));
-        document.getElementById('textDisplay').value=result;
-        if(!result.trim()) showToast('未识别到内容，请重试');
-      }catch(err){showToast('识别失败：'+err.message);document.getElementById('textDisplay').value='';}
-      finally{clearTimeout(safetyTimer);setBtnIdle();}
-    };
-    mediaRecorder.onerror=()=>{showToast('录音出错');isRecording=false;setBtnIdle();};
-    mediaRecorder.start(500);
-    setBtnRecording();
-    safetyTimer=setTimeout(()=>{if(isRecording)stopRecording();},58000);
-  }catch(err){showToast('无法启动录音：'+err.message);setBtnIdle();}
-}
-function stopRecording(){if(mediaRecorder&&mediaRecorder.state!=='inactive')mediaRecorder.stop();isRecording=false;}
-
-// ===================== 图片 =====================
+// ===================== 图片选择 =====================
 function addPhoto(){
   if(currentImages.length>=3){showToast('最多添加3张图片');return;}
   document.getElementById('fileInput').click();
@@ -438,6 +422,9 @@ function renderPhotoGrid(){
 }
 
 // ===================== 标注编辑器 =====================
+let editingIndex=-1, tool='pen', drawColor='#ff3b30', drawSize=4;
+let strokes=[], currentStroke=null, isDrawing=false, baseImage=null, canvas, ctx, startX, startY;
+
 function openEditor(index){
   editingIndex=index; strokes=[]; currentStroke=null; isDrawing=false;
   baseImage=new Image();
@@ -450,7 +437,8 @@ function openEditor(index){
 }
 function redrawCanvas(){ctx.clearRect(0,0,canvas.width,canvas.height);ctx.drawImage(baseImage,0,0,canvas.width,canvas.height);strokes.forEach(s=>drawStroke(s));}
 function drawStroke(stroke){
-  ctx.save(); ctx.strokeStyle=stroke.color; ctx.fillStyle=stroke.color;
+  ctx.save(); ctx.strokeStyle=stroke.color;
+  ctx.fillStyle=stroke.color;
   ctx.lineWidth=stroke.size; ctx.lineCap='round'; ctx.lineJoin='round';
   if(stroke.type==='pen'){ctx.beginPath();stroke.points.forEach((p,i)=>i===0?ctx.moveTo(p.x,p.y):ctx.lineTo(p.x,p.y));ctx.stroke();}
   else if(stroke.type==='circle'){const dx=stroke.x2-stroke.x1,dy=stroke.y2-stroke.y1;ctx.beginPath();ctx.ellipse(stroke.x1+dx/2,stroke.y1+dy/2,Math.abs(dx)/2,Math.abs(dy)/2,0,0,Math.PI*2);ctx.stroke();}
@@ -501,7 +489,7 @@ function renderRecordsList(){
 function deleteRow(i){records.splice(i,1);renderRecordsList();saveToStorage();showToast('已删除');}
 function clearAllRecords(){if(!records.length)return;if(!confirm(`确定清空全部 ${records.length} 行记录？`))return;records=[];renderRecordsList();saveToStorage();showToast('已清空所有记录');}
 
-// ===================== Excel导出（修复图片溢出）=====================
+// ===================== Excel导出 =====================
 function fitToCell(dataUrl){
   return new Promise(resolve=>{
     const img=new Image();
@@ -521,7 +509,6 @@ function toBuffer(dataUrl){
   return arr.buffer;
 }
 
-// 替换原有的 exportExcel 函数
 async function exportExcel(){
   if(!records.length) return;
   showToast('正在生成Excel，请稍候...');
@@ -535,16 +522,13 @@ async function exportExcel(){
     h.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF4472C4'}};
     h.alignment={vertical:'middle',horizontal:'center'};
 
-    // 【修改点1】设置更保守的物理像素上限。
-    // 行高 280 约等于 373 像素。我们将最大高度收缩到 320，确保底部有充足的安全边距。
-    const MAX_W = 380; 
+    const MAX_W = 380;
     const MAX_H = 320; 
 
     for(let i=0;i<records.length;i++){
       const row=records[i],ri=i+2,er=ws.getRow(ri);
       er.height=280;
       const tc=ws.getCell(ri,1); tc.value=row.text||''; tc.alignment={vertical:'middle',wrapText:true}; tc.font={size:11};
-      
       if(Array.isArray(row.images)){
         for(let j=0;j<Math.min(row.images.length,3);j++){
           const url=row.images[j];
@@ -560,7 +544,6 @@ async function exportExcel(){
             const id=wb.addImage({buffer:toBuffer(imgData.base64),extension:'jpeg'});
             
             ws.addImage(id,{
-              // 【修改点2】将偏移量改小 (0.05 -> 0.02)，防止图片被向下推挤出边框
               tl:{col: j + 1 + 0.02, row: ri - 1 + 0.02}, 
               ext:{width: finalW, height: finalH},
               editAs:'oneCell' 
