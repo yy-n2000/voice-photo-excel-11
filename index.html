@@ -8,11 +8,8 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="记录表">
   <meta name="theme-color" content="#4472C4">
-  <!-- PWA manifest -->
-  <link rel="manifest" href="manifest.json">
-  <!-- iOS图标 -->
-  <link rel="apple-touch-icon" href="icon-192.png">
   <title>语音拍照记录表</title>
+  <!-- 浏览器端 ExcelJS + FileSaver，完全不需要服务器 -->
   <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
   <style>
@@ -88,21 +85,9 @@
     #fileInput { display:none; }
     .toast { position:fixed; bottom:30px; left:50%; transform:translateX(-50%); background:rgba(0,0,0,0.75); color:white; padding:10px 22px; border-radius:24px; font-size:14px; display:none; z-index:9999; white-space:nowrap; }
     .toast.show { display:block; }
-
-    /* PWA安装提示条 */
-    .pwa-banner { display:none; background:#4472C4; color:white; padding:10px 16px; text-align:center; font-size:13px; cursor:pointer; }
-    .pwa-banner.show { display:block; }
-    .pwa-banner button { background:white; color:#4472C4; border:none; border-radius:8px; padding:4px 12px; font-size:12px; margin-left:8px; cursor:pointer; font-weight:600; }
   </style>
 </head>
 <body>
-
-<!-- PWA安装提示（Chrome/Android自动触发） -->
-<div class="pwa-banner" id="pwaBanner">
-  📲 安装到手机桌面，像App一样使用
-  <button onclick="installPWA()">立即安装</button>
-  <button onclick="document.getElementById('pwaBanner').classList.remove('show')" style="background:rgba(255,255,255,0.3);color:white;">✕</button>
-</div>
 
 <div class="header">
   <h1>🎤 语音拍照记录表</h1>
@@ -469,149 +454,89 @@ function renderRecordsList(){
 function deleteRow(i){records.splice(i,1);renderRecordsList();saveToStorage();showToast('已删除');}
 function clearAllRecords(){if(!records.length)return;if(!confirm(`确定清空全部 ${records.length} 行记录？`))return;records=[];renderRecordsList();saveToStorage();showToast('已清空所有记录');}
 
-// ===================== 图片尺寸获取 =====================
-function getImageInfo(dataUrl){
+// 替换原有的 fitToCell 函数
+function fitToCell(dataUrl){
   return new Promise(resolve=>{
     const img=new Image();
-    img.onload=()=>resolve({
-      base64: dataUrl,
-      width: img.naturalWidth,
-      height: img.naturalHeight
-    });
+    img.onload=()=>{
+      const c=document.createElement('canvas');
+      // 保持原始分辨率
+      c.width=img.naturalWidth;
+      c.height=img.naturalHeight;
+      const ct=c.getContext('2d');
+      ct.drawImage(img,0,0);
+      
+      // 返回对象：包含高画质base64和原图的宽高
+      resolve({
+        base64: c.toDataURL('image/jpeg', 0.95), // 0.95 保证了很好的画质
+        width: img.naturalWidth,
+        height: img.naturalHeight
+      });
+    };
     img.onerror=()=>resolve(null);
     img.src=dataUrl;
   });
 }
-function toBuffer(dataUrl){
-  const bin=atob(dataUrl.split('base64,')[1]);
-  const arr=new Uint8Array(bin.length);
-  for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
-  return arr.buffer;
-}
+function toBuffer(dataUrl){const bin=atob(dataUrl.split('base64,')[1]),arr=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);return arr.buffer;}
 
-// ===================== 导出Excel（修复图片溢出）=====================
-// 核心原理：
-// Excel 中 1行高单位 ≈ 0.75pt，1pt = 1/72英寸，96DPI下 1pt ≈ 1.333px
-// 行高280 → 物理高度 = 280 * 0.75 * (96/72) = 280px
-// 列宽单位：1个字符宽 ≈ 7px（默认字体11pt）
-// 列宽60 → 物理宽度 = 60 * 7 = 420px
-// 使用 editAs:'absolute' + 精确的EMU坐标彻底解决溢出问题
+// 替换原有的 exportExcel 函数
 async function exportExcel(){
   if(!records.length) return;
   showToast('正在生成Excel，请稍候...');
   document.getElementById('exportBtn').disabled=true;
   try{
     const wb=new ExcelJS.Workbook(), ws=wb.addWorksheet('记录');
-
-    // 列宽设置
-    const COL_WIDTHS = [50, 60, 60, 60]; // 字符数
-    COL_WIDTHS.forEach((w,i)=>{ws.getColumn(i+1).width=w;});
-
-    // 表头
+    [50,60,60,60].forEach((w,i)=>{ws.getColumn(i+1).width=w;});
     const h=ws.getRow(1);
     h.values=['语音文字','图片1','图片2','图片3']; h.height=22;
     h.font={bold:true,color:{argb:'FFFFFFFF'},size:12};
     h.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF4472C4'}};
     h.alignment={vertical:'middle',horizontal:'center'};
 
-    // ★ 关键参数：行高280磅 → 实际像素高度
-    // ExcelJS行高单位是"点(pt)"，1pt=1/72英寸
-    // 在96DPI屏幕：px = pt * 96/72 = pt * 4/3
-    // 280pt * 4/3 ≈ 373px，图片留10px边距，最大 363px
-    const ROW_HEIGHT_PT = 280;    // 行高（磅）
-    // 列宽60字符，每字符≈7px（Calibri 11pt），总宽≈420px，留边距最大410px
-    // 实际测试中Excel列宽=字符数*7px更准确
-    const CHAR_PX = 7;            // 每字符像素宽（Calibri 11pt近似）
-    const PT_TO_PX = 4 / 3;      // pt转px系数（96dpi）
-    const MARGIN = 4;             // 单元格内边距（像素）
+    // 【修改点1】设置更保守的物理像素上限。
+    // 行高 280 约等于 373 像素。我们将最大高度收缩到 320，确保底部有充足的安全边距。
+    const MAX_W = 380; 
+    const MAX_H = 320; 
 
     for(let i=0;i<records.length;i++){
-      const row=records[i], ri=i+2, er=ws.getRow(ri);
-      er.height=ROW_HEIGHT_PT;
-
-      // 文字列
-      const tc=ws.getCell(ri,1);
-      tc.value=row.text||'';
-      tc.alignment={vertical:'middle',wrapText:true};
-      tc.font={size:11};
-
+      const row=records[i],ri=i+2,er=ws.getRow(ri);
+      er.height=280;
+      const tc=ws.getCell(ri,1); tc.value=row.text||''; tc.alignment={vertical:'middle',wrapText:true}; tc.font={size:11};
+      
       if(Array.isArray(row.images)){
         for(let j=0;j<Math.min(row.images.length,3);j++){
           const url=row.images[j];
           if(!url||!url.includes('base64,')) continue;
           try{
-            const imgInfo=await getImageInfo(url);
-            if(!imgInfo) continue;
+            const imgData = await fitToCell(url);
+            if (!imgData) continue;
 
-            // 该列可用区域（像素）
-            const colW_px = COL_WIDTHS[j+1] * CHAR_PX - MARGIN*2;
-            const rowH_px = ROW_HEIGHT_PT * PT_TO_PX - MARGIN*2;
+            const scale = Math.min(MAX_W / imgData.width, MAX_H / imgData.height);
+            const finalW = Math.round(imgData.width * scale);
+            const finalH = Math.round(imgData.height * scale);
 
-            // 按比例缩放，完全放入单元格
-            const scale = Math.min(colW_px/imgInfo.width, rowH_px/imgInfo.height, 1);
-            const finalW = Math.round(imgInfo.width * scale);
-            const finalH = Math.round(imgInfo.height * scale);
-
-            const imgId=wb.addImage({buffer:toBuffer(imgInfo.base64),extension:'jpeg'});
-
-            // ★ 使用 'absolute' 模式 + 精确像素定位
-            // 这样图片绝对不会溢出到下一行
-            // tl/br 用列行索引（0-based），加上像素偏移
-            ws.addImage(imgId,{
-              tl:{ col: j+1+0.02, row: ri-1+0.02 },
-              ext:{ width: finalW, height: finalH },
-              editAs:'absolute'   // ★ 关键：absolute模式图片不随行列变化，完全固定在坐标
+            const id=wb.addImage({buffer:toBuffer(imgData.base64),extension:'jpeg'});
+            
+            ws.addImage(id,{
+              // 【修改点2】将偏移量改小 (0.05 -> 0.02)，防止图片被向下推挤出边框
+              tl:{col: j + 1 + 0.02, row: ri - 1 + 0.02}, 
+              ext:{width: finalW, height: finalH},
+              editAs:'oneCell' 
             });
-          }catch(e){console.error('图片处理失败',e);}
+          }catch(e){console.error('图片跳过',e);}
         }
       }
     }
-
     const buf=await wb.xlsx.writeBuffer();
-    saveAs(
-      new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),
-      `语音拍照记录_${new Date().toLocaleDateString('zh-CN').replace(/\//g,'')}.xlsx`
-    );
+    saveAs(new Blob([buf],{type:'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'}),
+      `语音拍照记录_${new Date().toLocaleDateString('zh-CN').replace(/\//g,'')}.xlsx`);
     showToast('导出成功 📊');
-  }catch(e){
-    showToast('导出失败：'+e.message);
-    console.error(e);
-  }finally{
-    document.getElementById('exportBtn').disabled=false;
-  }
+  }catch(e){showToast('导出失败：'+e.message);console.error(e);}
+  finally{document.getElementById('exportBtn').disabled=false;}
 }
 
 // ===================== Toast =====================
 function showToast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2500);}
-
-// ===================== PWA安装 =====================
-let deferredPrompt=null;
-window.addEventListener('beforeinstallprompt',(e)=>{
-  e.preventDefault();
-  deferredPrompt=e;
-  document.getElementById('pwaBanner').classList.add('show');
-});
-async function installPWA(){
-  if(!deferredPrompt) return;
-  deferredPrompt.prompt();
-  const {outcome}=await deferredPrompt.userChoice;
-  if(outcome==='accepted') showToast('安装成功！可从桌面打开 🎉');
-  deferredPrompt=null;
-  document.getElementById('pwaBanner').classList.remove('show');
-}
-window.addEventListener('appinstalled',()=>{
-  document.getElementById('pwaBanner').classList.remove('show');
-  showToast('已安装到桌面 ✅');
-});
-
-// ===================== 注册 Service Worker =====================
-if('serviceWorker' in navigator){
-  window.addEventListener('load',()=>{
-    navigator.serviceWorker.register('sw.js')
-      .then(()=>console.log('SW registered'))
-      .catch(e=>console.log('SW failed:',e));
-  });
-}
 </script>
 </body>
 </html>
