@@ -493,14 +493,18 @@ async function exportExcel(){
     h.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF4472C4'}};
     h.alignment={vertical:'middle',horizontal:'center'};
 
-    // 【修改点1】设置更保守的物理像素上限。
-    // 行高 280 约等于 373 像素。我们将最大高度收缩到 320，确保底部有充足的安全边距。
-    const MAX_W = 380; 
-    const MAX_H = 320; 
+    // 行高单位是 pt，换算成 px：280pt × (96/72) = 373px
+    // MAX_H 必须严格小于 373，留足安全边距，否则图片会溢出到下一行
+    const ROW_HEIGHT_PT = 280;
+    const ROW_HEIGHT_PX = Math.floor(ROW_HEIGHT_PT * 96 / 72); // 373px
+    const COL_WIDTH_CH  = 60;  // 字符单位
+    const COL_WIDTH_PX  = Math.floor(COL_WIDTH_CH * 7);        // 420px
+    const MAX_W = COL_WIDTH_PX - 20;   // 400px，左右各留10px
+    const MAX_H = ROW_HEIGHT_PX - 30;  // 343px，上下各留15px
 
     for(let i=0;i<records.length;i++){
       const row=records[i],ri=i+2,er=ws.getRow(ri);
-      er.height=280;
+      er.height=ROW_HEIGHT_PT;
       const tc=ws.getCell(ri,1); tc.value=row.text||''; tc.alignment={vertical:'middle',wrapText:true}; tc.font={size:11};
       
       if(Array.isArray(row.images)){
@@ -511,17 +515,20 @@ async function exportExcel(){
             const imgData = await fitToCell(url);
             if (!imgData) continue;
 
-            const scale = Math.min(MAX_W / imgData.width, MAX_H / imgData.height);
-            const finalW = Math.round(imgData.width * scale);
-            const finalH = Math.round(imgData.height * scale);
+            // 等比缩放，严格限制在 MAX_W × MAX_H 内
+            const scale  = Math.min(MAX_W / imgData.width, MAX_H / imgData.height, 1);
+            const finalW = Math.floor(imgData.width  * scale);
+            const finalH = Math.floor(imgData.height * scale);
+
+            // 居中：偏移 = (单元格尺寸 - 图片尺寸) / 2，转成列/行分数
+            const offCol = (COL_WIDTH_PX - finalW) / 2 / COL_WIDTH_PX;
+            const offRow = (ROW_HEIGHT_PX - finalH) / 2 / ROW_HEIGHT_PX;
 
             const id=wb.addImage({buffer:toBuffer(imgData.base64),extension:'jpeg'});
-            
             ws.addImage(id,{
-              // 【修改点2】将偏移量改小 (0.05 -> 0.02)，防止图片被向下推挤出边框
-              tl:{col: j + 1 + 0.02, row: ri - 1 + 0.02}, 
-              ext:{width: finalW, height: finalH},
-              editAs:'oneCell' 
+              tl:{ col: j+1+offCol, row: ri-1+offRow },
+              ext:{ width: finalW, height: finalH },
+              editAs:'absolute'   // absolute 不随行列缩放，定位最稳定
             });
           }catch(e){console.error('图片跳过',e);}
         }
