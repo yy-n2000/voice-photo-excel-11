@@ -454,25 +454,24 @@ function renderRecordsList(){
 function deleteRow(i){records.splice(i,1);renderRecordsList();saveToStorage();showToast('已删除');}
 function clearAllRecords(){if(!records.length)return;if(!confirm(`确定清空全部 ${records.length} 行记录？`))return;records=[];renderRecordsList();saveToStorage();showToast('已清空所有记录');}
 
-// fitToCell：用 canvas 把图片缩放到精确的固定尺寸
-// CELL_W / CELL_H 就是最终传给 ext 的值，单位 px，两者完全一致，不可能溢出
-const CELL_W = 380;  // 图片宽度（px），同时也是 ext.width
-const CELL_H = 300;  // 图片高度（px），同时也是 ext.height，行高需 > 300px
-const CELL_P = 0;    // 画布内留白（0 = 图片铺满画布）
-
+// 替换原有的 fitToCell 函数
 function fitToCell(dataUrl){
   return new Promise(resolve=>{
     const img=new Image();
     img.onload=()=>{
       const c=document.createElement('canvas');
-      c.width=CELL_W; c.height=CELL_H;
+      // 保持原始分辨率
+      c.width=img.naturalWidth;
+      c.height=img.naturalHeight;
       const ct=c.getContext('2d');
-      ct.fillStyle='#ffffff'; ct.fillRect(0,0,CELL_W,CELL_H);
-      // 等比缩放，保持比例，居中绘制
-      const r=Math.min((CELL_W-CELL_P*2)/img.naturalWidth,(CELL_H-CELL_P*2)/img.naturalHeight);
-      const dw=Math.floor(img.naturalWidth*r), dh=Math.floor(img.naturalHeight*r);
-      ct.drawImage(img,Math.floor((CELL_W-dw)/2),Math.floor((CELL_H-dh)/2),dw,dh);
-      resolve(c.toDataURL('image/jpeg',0.95));
+      ct.drawImage(img,0,0);
+      
+      // 返回对象：包含高画质base64和原图的宽高
+      resolve({
+        base64: c.toDataURL('image/jpeg', 0.95), // 0.95 保证了很好的画质
+        width: img.naturalWidth,
+        height: img.naturalHeight
+      });
     };
     img.onerror=()=>resolve(null);
     img.src=dataUrl;
@@ -480,28 +479,28 @@ function fitToCell(dataUrl){
 }
 function toBuffer(dataUrl){const bin=atob(dataUrl.split('base64,')[1]),arr=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);return arr.buffer;}
 
+// 替换原有的 exportExcel 函数
 async function exportExcel(){
   if(!records.length) return;
   showToast('正在生成Excel，请稍候...');
   document.getElementById('exportBtn').disabled=true;
   try{
     const wb=new ExcelJS.Workbook(), ws=wb.addWorksheet('记录');
-    // 列宽：第1列文字列，后3列图片列
-    // 图片列宽设成和 CELL_W 匹配：CELL_W/7 ≈ 54 字符单位
-    [50, 55, 55, 55].forEach((w,i)=>{ws.getColumn(i+1).width=w;});
+    [50,60,60,60].forEach((w,i)=>{ws.getColumn(i+1).width=w;});
     const h=ws.getRow(1);
     h.values=['语音文字','图片1','图片2','图片3']; h.height=22;
     h.font={bold:true,color:{argb:'FFFFFFFF'},size:12};
     h.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF4472C4'}};
     h.alignment={vertical:'middle',horizontal:'center'};
 
-    // 行高：必须 > CELL_H px 换算成 pt
-    // CELL_H=300px → 300/(96/72)=225pt，设 230pt 留一点余量
-    const ROW_H_PT = 230;
+    // 【修改点1】设置更保守的物理像素上限。
+    // 行高 280 约等于 373 像素。我们将最大高度收缩到 320，确保底部有充足的安全边距。
+    const MAX_W = 380; 
+    const MAX_H = 320; 
 
     for(let i=0;i<records.length;i++){
       const row=records[i],ri=i+2,er=ws.getRow(ri);
-      er.height=ROW_H_PT;
+      er.height=280;
       const tc=ws.getCell(ri,1); tc.value=row.text||''; tc.alignment={vertical:'middle',wrapText:true}; tc.font={size:11};
       
       if(Array.isArray(row.images)){
@@ -509,14 +508,20 @@ async function exportExcel(){
           const url=row.images[j];
           if(!url||!url.includes('base64,')) continue;
           try{
-            const fitted=await fitToCell(url);
-            if(!fitted) continue;
-            const id=wb.addImage({buffer:toBuffer(fitted),extension:'jpeg'});
-            // tl 对齐单元格左上角，ext 精确等于画布尺寸，绝对不会溢出
+            const imgData = await fitToCell(url);
+            if (!imgData) continue;
+
+            const scale = Math.min(MAX_W / imgData.width, MAX_H / imgData.height);
+            const finalW = Math.round(imgData.width * scale);
+            const finalH = Math.round(imgData.height * scale);
+
+            const id=wb.addImage({buffer:toBuffer(imgData.base64),extension:'jpeg'});
+            
             ws.addImage(id,{
-              tl:{col:j+1, row:ri-1},
-              ext:{width:CELL_W, height:CELL_H},
-              editAs:'absolute'
+              // 【修改点2】将偏移量改小 (0.05 -> 0.02)，防止图片被向下推挤出边框
+              tl:{col: j + 1 + 0.02, row: ri - 1 + 0.02}, 
+              ext:{width: finalW, height: finalH},
+              editAs:'oneCell' 
             });
           }catch(e){console.error('图片跳过',e);}
         }
