@@ -198,7 +198,7 @@ async function loadFromStorage() {
 window.addEventListener('load', loadFromStorage);
 
 // ===================== 图片压缩 =====================
-function compressImage(dataUrl, maxSize=1000, quality=0.9) {
+function compressImage(dataUrl, maxSize=2000, quality=0.95) {
   return new Promise(resolve=>{
     const img=new Image();
     img.onload=()=>{
@@ -367,7 +367,7 @@ async function handleFileSelect(e){
     if(!file.type.startsWith('image/')) continue;
     const reader=new FileReader();
     reader.onload=async ev=>{
-      const compressed=await compressImage(ev.target.result,1000,0.9);
+      const compressed=await compressImage(ev.target.result,2000,0.95);
       currentImages.push(compressed);
       renderPhotoGrid();
     };
@@ -426,7 +426,7 @@ function setSize(s){drawSize=parseInt(s);}
 function undoStroke(){if(strokes.length){strokes.pop();redrawCanvas();}}
 function clearAnnotations(){strokes=[];redrawCanvas();}
 function closeEditor(){document.getElementById('editorOverlay').classList.remove('show');}
-function saveAnnotation(){currentImages[editingIndex]=canvas.toDataURL('image/jpeg',0.85);closeEditor();renderPhotoGrid();showToast('标注已保存 ✅');}
+function saveAnnotation(){currentImages[editingIndex]=canvas.toDataURL('image/jpeg');closeEditor();renderPhotoGrid();showToast('标注已保存 ✅');}
 
 // ===================== 添加行 =====================
 async function addRow(){
@@ -456,7 +456,7 @@ function clearAllRecords(){if(!records.length)return;if(!confirm(`确定清空�
 
 // ===================== 导出Excel（纯前端）=====================
 function fitToCell(dataUrl){
-  const W=140,H=120,P=6;
+  const W=800,H=600,P=6;
   return new Promise(resolve=>{
     const img=new Image();
     img.onload=()=>{
