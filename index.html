@@ -479,7 +479,6 @@ function fitToCell(dataUrl){
 }
 function toBuffer(dataUrl){const bin=atob(dataUrl.split('base64,')[1]),arr=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);return arr.buffer;}
 
-// 替换原有的 exportExcel 函数
 async function exportExcel(){
   if(!records.length) return;
   showToast('正在生成Excel，请稍候...');
