@@ -14,7 +14,6 @@
   
   <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
-  <script src="https://cdn.jsdelivr.net/npm/vosk-browser@0.0.8/dist/vosk.js"></script>
   
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -171,136 +170,103 @@
 // ===================== 全局状态 =====================
 let records=[], currentImages=[], isRecording=false, safetyTimer=null;
 
-// ===================== Vosk 离线语音识别 =====================
-let voskModel = null;
-let recognizer = null;
-let audioCtx = null;
-let mediaStreamSource = null;
-let processor = null;
+// ===================== Web Speech API 语音识别 =====================
+let recognition = null;
+let accumulatedText = ''; // 累积已确认的文字
 
-// 官方 CDN 模型地址（备用多个，依次尝试）
-const MODEL_URLS = [
-  'https://alphacephei.com/vosk/models/vosk-model-small-cn-0.22.zip',
-  'https://ccoreilly.github.io/vosk-browser/models/vosk-model-small-cn-0.22.zip',
-];
-
-async function initVosk() {
-  if (voskModel && recognizer) return true;
-
-  // 更新状态文字为下载进度提示
-  const statusEl = document.getElementById('voiceStatus');
-  const btnInner = document.getElementById('voiceBtnInner');
-
-  function setLoadingText(msg) {
-    statusEl.textContent = msg;
-    statusEl.className = 'voice-status processing';
-    btnInner.textContent = '⏳ 加载中...';
+function initSpeechRecognition() {
+  const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+  if (!SpeechRecognition) {
+    showToast('您的浏览器不支持语音识别，请使用 Chrome 或 Edge');
+    return false;
   }
+  recognition = new SpeechRecognition();
+  recognition.lang = 'zh-CN';
+  recognition.continuous = true;       // 持续识别，不自动停止
+  recognition.interimResults = true;   // 返回实时中间结果
+  recognition.maxAlternatives = 1;
 
-  setLoadingText('正在连接模型服务器，请稍候...');
-
-  // 尝试多个镜像地址
-  for (let i = 0; i < MODEL_URLS.length; i++) {
-    const url = MODEL_URLS[i];
-    try {
-      setLoadingText(`正在下载离线语音模型（约40MB），请保持网络连接...`);
-      console.log(`尝试加载模型：${url}`);
-
-      const { createModel } = window.Vosk;
-
-      // 用 fetch 先检测可达性（5秒超时）
-      const probe = await Promise.race([
-        fetch(url, { method: 'HEAD', mode: 'no-cors' }),
-        new Promise((_, rej) => setTimeout(() => rej(new Error('timeout')), 5000))
-      ]).catch(() => null);
-
-      // 加载模型（Vosk 内部会下载 zip）
-      voskModel = await createModel(url);
-      recognizer = new voskModel.KaldiRecognizer(16000);
-      showToast('离线模型加载完成 ✅');
-      return true;
-    } catch (err) {
-      console.warn(`模型地址 ${url} 加载失败：`, err);
-      if (i < MODEL_URLS.length - 1) {
-        setLoadingText(`线路${i+1}失败，正在切换备用线路...`);
-        await new Promise(r => setTimeout(r, 1000));
+  recognition.onresult = (event) => {
+    let interimText = '';
+    for (let i = event.resultIndex; i < event.results.length; i++) {
+      const transcript = event.results[i][0].transcript;
+      if (event.results[i].isFinal) {
+        accumulatedText += transcript; // 追加已确认文字
+      } else {
+        interimText = transcript;      // 实时预览未确认文字
       }
     }
-  }
+    // 文本框显示：已确认 + 正在说的（灰色提示用同一框）
+    document.getElementById('textDisplay').value = accumulatedText + interimText;
+  };
 
-  showToast('模型加载失败：网络不稳定，请检查网络后重试');
-  setBtnIdle();
-  return false;
+  recognition.onerror = (event) => {
+    if (event.error === 'not-allowed') {
+      showToast('麦克风权限被拒绝，请在浏览器设置中允许');
+    } else if (event.error === 'no-speech') {
+      // 没检测到声音，静默重启（continuous模式下正常）
+    } else if (event.error === 'network') {
+      showToast('网络错误，语音识别需要联网');
+    } else {
+      console.warn('语音识别错误:', event.error);
+    }
+  };
+
+  recognition.onend = () => {
+    // continuous 模式下意外中断时自动重启（用户主动停止除外）
+    if (isRecording) {
+      try { recognition.start(); } catch(e) {}
+    } else {
+      setBtnIdle();
+    }
+  };
+
+  return true;
 }
 
-async function toggleRecording() {
+function toggleRecording() {
   if (isRecording) {
     stopRecording();
   } else {
-    setBtnProcessing(); // 显示加载状态
-    const isReady = await initVosk();
-    if (isReady) await startRecording();
+    startRecording();
   }
 }
 
 function setBtnRecording(){
-  isRecording=true;
-  document.getElementById('voiceBtn').className='voice-btn recording';
-  document.getElementById('voiceBtnInner').innerHTML='<div class="wave-bars"><div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div></div> 点击停止录音';
-  const s=document.getElementById('voiceStatus'); s.textContent='🔴 正在录音...'; s.className='voice-status recording';
-}
-
-function setBtnProcessing(){
-  isRecording=false;
-  document.getElementById('voiceBtn').className='voice-btn processing';
-  document.getElementById('voiceBtnInner').textContent='⏳ 加载中...';
-  const s=document.getElementById('voiceStatus'); s.textContent='正在初始化，请稍候...'; s.className='voice-status processing';
+  isRecording = true;
+  document.getElementById('voiceBtn').className = 'voice-btn recording';
+  document.getElementById('voiceBtnInner').innerHTML = '<div class="wave-bars"><div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div><div class="wave-bar"></div></div> 点击停止录音';
+  const s = document.getElementById('voiceStatus');
+  s.textContent = '🔴 正在录音，说完点击停止...';
+  s.className = 'voice-status recording';
 }
 
 function setBtnIdle(){
-  isRecording=false;
-  document.getElementById('voiceBtn').className='voice-btn';
-  document.getElementById('voiceBtnInner').textContent='🎤 点击开始录音';
-  const s=document.getElementById('voiceStatus'); s.textContent='点击按钮开始说话，说完再次点击停止识别'; s.className='voice-status';
+  isRecording = false;
+  document.getElementById('voiceBtn').className = 'voice-btn';
+  document.getElementById('voiceBtnInner').textContent = '🎤 点击开始录音';
+  const s = document.getElementById('voiceStatus');
+  s.textContent = '点击按钮开始说话，说完再次点击停止识别';
+  s.className = 'voice-status';
 }
 
-async function startRecording() {
+function startRecording() {
+  if (!recognition && !initSpeechRecognition()) return;
+
+  accumulatedText = '';
+  document.getElementById('textDisplay').value = '';
+
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({
-      audio: { echoCancellation: true, noiseSuppression: true, channelCount: 1, sampleRate: 16000 }
-    });
-    
-    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 16000 });
-    mediaStreamSource = audioCtx.createMediaStreamSource(stream);
-    processor = audioCtx.createScriptProcessor(4096, 1, 1);
-    
-    document.getElementById('textDisplay').value = '';
-    
-    processor.onaudioprocess = (e) => {
-      if (!isRecording) return;
-      const audioData = e.inputBuffer.getChannelData(0);
-      
-      if (recognizer.acceptWaveform(audioData)) {
-        const result = recognizer.getResult();
-        if (result.text) {
-          // 去除 Vosk 中文识别结果里自带的空格
-          const cleanText = result.text.replace(/\s+/g, '');
-          const currentText = document.getElementById('textDisplay').value;
-          document.getElementById('textDisplay').value = currentText + cleanText;
-        }
-      }
-    };
-
-    mediaStreamSource.connect(processor);
-    processor.connect(audioCtx.destination);
-
+    recognition.start();
     setBtnRecording();
-    
-    // 安全机制：最长录音1分钟自动停止
-    safetyTimer = setTimeout(() => {
-      if (isRecording) stopRecording();
-    }, 60000);
 
+    // 安全机制：最长录音3分钟自动停止
+    safetyTimer = setTimeout(() => {
+      if (isRecording) {
+        stopRecording();
+        showToast('已自动停止（超过3分钟）');
+      }
+    }, 180000);
   } catch (err) {
     showToast('无法启动录音：' + err.message);
     setBtnIdle();
@@ -310,31 +276,11 @@ async function startRecording() {
 function stopRecording() {
   isRecording = false;
   clearTimeout(safetyTimer);
-  
-  if (processor) {
-    processor.disconnect();
-    processor = null;
+  if (recognition) {
+    try { recognition.stop(); } catch(e) {}
   }
-  if (mediaStreamSource) {
-    mediaStreamSource.mediaStream.getTracks().forEach(t => t.stop());
-    mediaStreamSource.disconnect();
-    mediaStreamSource = null;
-  }
-  if (audioCtx && audioCtx.state !== 'closed') {
-    audioCtx.close();
-    audioCtx = null;
-  }
-
-  // 获取最后一段未完成的识别结果
-  if (recognizer) {
-    const finalResult = recognizer.getFinalResult();
-    if (finalResult.text) {
-      const cleanText = finalResult.text.replace(/\s+/g, '');
-      const currentText = document.getElementById('textDisplay').value;
-      document.getElementById('textDisplay').value = currentText + cleanText;
-    }
-  }
-
+  // 保留最终文字到文本框
+  document.getElementById('textDisplay').value = accumulatedText;
   setBtnIdle();
 }
 
