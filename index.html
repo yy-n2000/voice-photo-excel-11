@@ -12,15 +12,6 @@
   <!-- 浏览器端 ExcelJS + FileSaver，完全不需要服务器 -->
   <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
-  
-  <link rel="manifest" href="manifest.json">
-<script>
-  if ('serviceWorker' in navigator) {
-    window.addEventListener('load', () => {
-      navigator.serviceWorker.register('sw.js').catch(err => console.log('SW 注册失败', err));
-    });
-  }
-</script>
   <style>
     * { box-sizing: border-box; margin: 0; padding: 0; }
     body { font-family: -apple-system, BlinkMacSystemFont, 'PingFang SC', sans-serif; background: #f0f2f5; min-height: 100vh; }
@@ -489,7 +480,6 @@ function fitToCell(dataUrl){
 function toBuffer(dataUrl){const bin=atob(dataUrl.split('base64,')[1]),arr=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);return arr.buffer;}
 
 // 替换原有的 exportExcel 函数
-// 替换原有的 exportExcel 函数
 async function exportExcel(){
   if(!records.length) return;
   showToast('正在生成Excel，请稍候...');
@@ -503,13 +493,14 @@ async function exportExcel(){
     h.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FF4472C4'}};
     h.alignment={vertical:'middle',horizontal:'center'};
 
-    // 设定列宽和行高的近似像素值，用于计算单元格内比例
-    const colWidthPx = 60 * 7.5;  // 列宽 60 约等于 450px
-    const rowHeightPx = 280 * 1.33; // 行高 280 约等于 373px
+    // 【修改点1】设置更保守的物理像素上限。
+    // 行高 280 约等于 373 像素。我们将最大高度收缩到 320，确保底部有充足的安全边距。
+    const MAX_W = 380; 
+    const MAX_H = 320; 
 
     for(let i=0;i<records.length;i++){
       const row=records[i],ri=i+2,er=ws.getRow(ri);
-      er.height=280; // 保持行高不变
+      er.height=280;
       const tc=ws.getCell(ri,1); tc.value=row.text||''; tc.alignment={vertical:'middle',wrapText:true}; tc.font={size:11};
       
       if(Array.isArray(row.images)){
@@ -520,21 +511,16 @@ async function exportExcel(){
             const imgData = await fitToCell(url);
             if (!imgData) continue;
 
-            // 核心计算：计算图片在单元格内的安全缩放比例 (留出 10% 的边距)
-            const safeW = colWidthPx * 0.9;
-            const safeH = rowHeightPx * 0.9;
-            const scale = Math.min(safeW / imgData.width, safeH / imgData.height);
-
-            // 计算图片最终占据的宽、高占比分数 (相对于整个单元格)
-            const wFrac = (imgData.width * scale) / colWidthPx;
-            const hFrac = (imgData.height * scale) / rowHeightPx;
+            const scale = Math.min(MAX_W / imgData.width, MAX_H / imgData.height);
+            const finalW = Math.round(imgData.width * scale);
+            const finalH = Math.round(imgData.height * scale);
 
             const id=wb.addImage({buffer:toBuffer(imgData.base64),extension:'jpeg'});
             
-            // 核心修复：使用 tl 和 br 的小数坐标进行强制范围约束
             ws.addImage(id,{
-              tl:{col: j + 1 + 0.05, row: ri - 1 + 0.05}, // 左上角：偏移 5% (居中对齐用)
-              br:{col: j + 1 + 0.05 + wFrac, row: ri - 1 + 0.05 + hFrac}, // 右下角：左上角位置 + 图片占比
+              // 【修改点2】将偏移量改小 (0.05 -> 0.02)，防止图片被向下推挤出边框
+              tl:{col: j + 1 + 0.02, row: ri - 1 + 0.02}, 
+              ext:{width: finalW, height: finalH},
               editAs:'oneCell' 
             });
           }catch(e){console.error('图片跳过',e);}
