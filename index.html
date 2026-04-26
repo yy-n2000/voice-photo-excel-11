@@ -8,8 +8,11 @@
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
   <meta name="apple-mobile-web-app-title" content="记录表">
   <meta name="theme-color" content="#4472C4">
+  <!-- PWA manifest -->
+  <link rel="manifest" href="manifest.json">
+  <!-- iOS PWA icons -->
+  <link rel="apple-touch-icon" href="icon-192.png">
   <title>语音拍照记录表</title>
-  <!-- 浏览器端 ExcelJS + FileSaver，完全不需要服务器 -->
   <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
   <script src="https://cdn.jsdelivr.net/npm/file-saver@2.0.5/dist/FileSaver.min.js"></script>
   <style>
@@ -18,6 +21,10 @@
     .header { background: linear-gradient(135deg, #4472C4, #2d5aa0); color: white; padding: 20px 16px 16px; text-align: center; }
     .header h1 { font-size: 20px; margin-bottom: 4px; }
     .header p  { font-size: 13px; opacity: 0.85; }
+    /* PWA install banner */
+    .pwa-banner { background: #fff3cd; border-bottom: 1px solid #ffc107; padding: 10px 16px; display: flex; align-items: center; justify-content: space-between; font-size: 13px; color: #856404; }
+    .pwa-banner button { background: #ffc107; border: none; border-radius: 8px; padding: 6px 12px; font-size: 12px; cursor: pointer; color: #333; font-weight: 600; }
+    .pwa-banner .close-btn { background: none; color: #aaa; padding: 4px; }
     .container { padding: 16px; max-width: 600px; margin: 0 auto; }
 
     .input-card { background: white; border-radius: 16px; padding: 20px; margin-bottom: 16px; box-shadow: 0 2px 12px rgba(0,0,0,0.08); }
@@ -89,6 +96,15 @@
 </head>
 <body>
 
+<!-- PWA 安装提示横幅 -->
+<div class="pwa-banner" id="pwaBanner" style="display:none">
+  <span>📲 安装到主屏幕，离线也能用</span>
+  <div style="display:flex;gap:6px">
+    <button onclick="installPWA()">立即安装</button>
+    <button class="close-btn" onclick="dismissBanner()">✕</button>
+  </div>
+</div>
+
 <div class="header">
   <h1>🎤 语音拍照记录表</h1>
   <p>语音输入 + 拍照标注，自动生成Excel</p>
@@ -158,6 +174,37 @@ const XF_API_SECRET = 'Yjk3ZDBkNmVkMmRjZWNjNTQ5MTEzYjEy';
 
 // ===================== 全局状态 =====================
 let records=[], currentImages=[], isRecording=false, mediaRecorder=null, audioChunks=[], safetyTimer=null;
+
+// ===================== PWA =====================
+let deferredPrompt = null;
+window.addEventListener('beforeinstallprompt', e => {
+  e.preventDefault();
+  deferredPrompt = e;
+  if (!localStorage.getItem('pwaBannerDismissed')) {
+    document.getElementById('pwaBanner').style.display = 'flex';
+  }
+});
+function installPWA() {
+  if (!deferredPrompt) {
+    showToast('请在浏览器菜单中选择"添加到主屏幕"');
+    return;
+  }
+  deferredPrompt.prompt();
+  deferredPrompt.userChoice.then(() => {
+    deferredPrompt = null;
+    document.getElementById('pwaBanner').style.display = 'none';
+  });
+}
+function dismissBanner() {
+  localStorage.setItem('pwaBannerDismissed', '1');
+  document.getElementById('pwaBanner').style.display = 'none';
+}
+// 注册 Service Worker
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('sw.js').catch(() => {});
+  });
+}
 
 // ===================== IndexedDB =====================
 const DB_NAME='voiceExcelDB', DB_VERSION=1, STORE_NAME='records';
@@ -454,31 +501,27 @@ function renderRecordsList(){
 function deleteRow(i){records.splice(i,1);renderRecordsList();saveToStorage();showToast('已删除');}
 function clearAllRecords(){if(!records.length)return;if(!confirm(`确定清空全部 ${records.length} 行记录？`))return;records=[];renderRecordsList();saveToStorage();showToast('已清空所有记录');}
 
-// 替换原有的 fitToCell 函数
+// ===================== Excel导出（修复图片溢出）=====================
 function fitToCell(dataUrl){
   return new Promise(resolve=>{
     const img=new Image();
     img.onload=()=>{
       const c=document.createElement('canvas');
-      // 保持原始分辨率
-      c.width=img.naturalWidth;
-      c.height=img.naturalHeight;
-      const ct=c.getContext('2d');
-      ct.drawImage(img,0,0);
-      
-      // 返回对象：包含高画质base64和原图的宽高
-      resolve({
-        base64: c.toDataURL('image/jpeg', 0.95), // 0.95 保证了很好的画质
-        width: img.naturalWidth,
-        height: img.naturalHeight
-      });
+      c.width=img.naturalWidth; c.height=img.naturalHeight;
+      c.getContext('2d').drawImage(img,0,0);
+      resolve({ base64:c.toDataURL('image/jpeg',0.95), width:img.naturalWidth, height:img.naturalHeight });
     };
     img.onerror=()=>resolve(null);
     img.src=dataUrl;
   });
 }
-function toBuffer(dataUrl){const bin=atob(dataUrl.split('base64,')[1]),arr=new Uint8Array(bin.length);for(let i=0;i<bin.length;i++)arr[i]=bin.charCodeAt(i);return arr.buffer;}
+function toBuffer(dataUrl){
+  const bin=atob(dataUrl.split('base64,')[1]), arr=new Uint8Array(bin.length);
+  for(let i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
+  return arr.buffer;
+}
 
+// 替换原有的 exportExcel 函数
 async function exportExcel(){
   if(!records.length) return;
   showToast('正在生成Excel，请稍候...');
@@ -533,7 +576,6 @@ async function exportExcel(){
   }catch(e){showToast('导出失败：'+e.message);console.error(e);}
   finally{document.getElementById('exportBtn').disabled=false;}
 }
-
 // ===================== Toast =====================
 function showToast(msg){const t=document.getElementById('toast');t.textContent=msg;t.classList.add('show');setTimeout(()=>t.classList.remove('show'),2500);}
 </script>
